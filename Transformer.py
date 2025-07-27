@@ -4,15 +4,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Hyperparameters
-block_size = 8
-batch_size = 32
+block_size = 64 # how many tokens to predict
+batch_size = 256 # essentially the context window
 max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-3
+learning_rate = 3e-4
 eval_iters = 200
-n_embedd = 32
+n_embedd = 48
+n_layer = 6 # means every head has 384/6 dim
+n_head = 6
+dropout = 0.2
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
 # Load dataset
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -66,6 +70,7 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embedd, head_size, bias=False)
         self.value = nn.Linear(n_embedd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -74,6 +79,7 @@ class Head(nn.Module):
         w = q @ k.transpose(-2, -1) * C**-0.5
         w = w.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
+        w = self.dropout(w)
         v = self.value(x)
         return w @ v
 
@@ -82,10 +88,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embedd, n_embedd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([head(x) for head in self.heads], dim=-1)
-        return self.proj(out)
+        out = self.dropout(self.proj(out))
+        return out
 
 class FeedForward(nn.Module):
     def __init__(self, n_embedd):
@@ -94,6 +102,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embedd, 4 * n_embedd),
             nn.ReLU(),
             nn.Linear(4 * n_embedd, n_embedd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -119,12 +128,7 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embedd)
         self.position_embedding_table = nn.Embedding(block_size, n_embedd)
-        self.blocks = nn.Sequential(
-            Block(n_embedd, 4),
-            Block(n_embedd, 4),
-            Block(n_embedd, 4),
-            nn.LayerNorm(n_embedd)  # final layer normalization
-        )
+        self.blocks = nn.Sequential(*[Block(n_embedd, n_head=n_head) for _ in range(n_layer)])
         self.lm_head = nn.Linear(n_embedd, vocab_size)
 
     def forward(self, idx, targets=None):
