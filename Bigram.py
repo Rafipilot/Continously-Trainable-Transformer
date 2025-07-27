@@ -38,7 +38,7 @@ for i, char in enumerate(chars):
     encoding[char] = i
 
 for i, char in enumerate(chars):
-    encoding[i] = char
+    decoding[i] = char
 
 def encode(text):
     encoded = []
@@ -50,7 +50,7 @@ def encode(text):
 def decode(text):
     decoded = []
     for c in text:
-        decoded.append(encoding[c])
+        decoded.append(decoding[c])
 
     return decoded
 
@@ -115,6 +115,7 @@ def estimate_loss():
             logits, loss = model(xb, yb)
             losses[k] = loss.item()
         out[split] = losses.mean()
+
     model.train()
     return out
 
@@ -124,8 +125,10 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size,  n_embedd)
         self.positional_embedding_table = nn.Embedding(block_size, n_embedd) # positional embedding
-        self.sa_head = Head(n_embedd) # self attention head
-        self.lm_head = nn.Linear(n_embedd, vocab_size) # no bias because we are not using it
+        self.sa_heads = MultiHeadAttention(4, n_embedd//4)
+        self.ffwd= FeedForward(n_embedd)
+
+        self.lm_head = nn.Linear(n_embedd, vocab_size)
 
     def forward(self, idx, targets=None):
         B,T = idx.shape # B is batch size, T is block size
@@ -133,7 +136,8 @@ class BigramLanguageModel(nn.Module):
         token_emb= self.token_embedding_table(idx)
         pos_emb = self.positional_embedding_table(torch.arange(T, device=device)) # get the positional embedding for each position in the input sequence
         x = token_emb + pos_emb # add the token and positional embeddings
-        x = self.sa_head(x) # apply self attention head
+        x = self.sa_heads(x) # apply self attention head
+        x = self.ffwd(x) # apply feed forward network
         logits = self.lm_head(x)
         if targets == None:
             loss = None
@@ -148,20 +152,37 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         for i in range(max_new_tokens):
             idx_cond = idx[:, -block_size:] # cant take more than block size tokens as input so am clipping it off
-            logits, loss = self(idx) # get the predictions
+            logits, loss = self(idx_cond) # get the predictions
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim = 1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim = 1)
-
         return idx
     
-class Head(nn.Module):
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([head(x) for head in self.heads], dim=-1)
+    
+class FeedForward(nn.Module):
     def __init__(self, n_embedd):
         super().__init__()
-        self.key = nn.Linear(n_embedd, n_embedd, bias=False)
-        self.query = nn.Linear(n_embedd, n_embedd, bias=False)
-        self.value = nn.Linear(n_embedd, n_embedd, bias=False)
+        self.net = nn.Sequential(  # basic 
+            nn.Linear(n_embedd,  n_embedd),
+            nn.ReLU(),
+        )
+    def forward(self, x):
+        return self.net(x)
+    
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embedd, head_size, bias=False)
+        self.query = nn.Linear(n_embedd, head_size, bias=False)
+        self.value = nn.Linear(n_embedd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size))) # creating trill parameter which is the lower triangular matrix
 
     def forward(self, x):
@@ -180,13 +201,12 @@ logits, loss = model(xb, yb)
 print(logits.shape)
 print(loss)
 
-print(decode(model.generate(idx = torch.zeros((1,1), dtype=torch.long), max_new_tokens=100)[0].tolist()))
-
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
 
 for steps in range(10000):
     if steps % eval_interval == 0:
-        estimate_loss()
+        loss=estimate_loss()
+        print(f"step {steps}: train loss {loss['train']:.4f}, test loss {loss['test']:.4f}")
     xb, yb = get_batch("train")
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
