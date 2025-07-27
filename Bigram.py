@@ -4,6 +4,16 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+block_size = 8
+batch_size = 32
+max_iters = 3000
+eval_interval = 300
+learning_rate = 1e-3
+eval_iters = 200
+n_embedd = 32
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 response = requests.get(url)
 
@@ -44,9 +54,6 @@ def decode(text):
 
     return decoded
 
-print(encode("hii there"))
-print(decode(encode("hii there")))
-
 data = torch.tensor(encode(text), dtype = torch.long)
 print(data.shape, data.dtype)
 #print(data[:1000])
@@ -57,7 +64,7 @@ train_data = data[:n]
 test_data = data[n:]
 
 
-block_size = 8
+
 train_data[:block_size+1]
 
 x = train_data[:block_size]
@@ -76,7 +83,9 @@ def get_batch(split):
     ix  = torch.randint(len(data) - block_size, (batch_size,)) # since batch size is 4 we generate 4 numbers between 0 and length of data - block size
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix]) # of set of 1 of x
+    x, y = x.to(device), y.to(device)
     return x,y
+
 xb, yb = get_batch("train")
 print("inputs: ")
 print(xb.shape)
@@ -95,29 +104,50 @@ for b in range(batch_size):
 
 torch.manual_seed(1337)
 
+@torch.no_grad() # makes it more efficent because we are not doing backprop
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ["train", "test"]:
+        losses = torch.zeros(eval_iters)
+        for k in range (eval_iters):
+            xb, yb = get_batch(split)
+            logits, loss = model(xb, yb)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
 class BigramLanguageModel(nn.Module):
 
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size,  n_embedd)
+        self.positional_embedding_table = nn.Embedding(block_size, n_embedd) # positional embedding
+        self.sa_head = Head(n_embedd) # self attention head
+        self.lm_head = nn.Linear(n_embedd, vocab_size) # no bias because we are not using it
 
     def forward(self, idx, targets=None):
+        B,T = idx.shape # B is batch size, T is block size
 
-        logits = self.token_embedding_table(idx)
+        token_emb= self.token_embedding_table(idx)
+        pos_emb = self.positional_embedding_table(torch.arange(T, device=device)) # get the positional embedding for each position in the input sequence
+        x = token_emb + pos_emb # add the token and positional embeddings
+        x = self.sa_head(x) # apply self attention head
+        logits = self.lm_head(x)
         if targets == None:
             loss = None
         else:
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
-
             targets = targets.view(B*T)
-
             loss = F.cross_entropy(logits, targets) # calc the cross entropy ( negative log) loss
 
         return logits, loss
     
     def generate(self, idx, max_new_tokens):
         for i in range(max_new_tokens):
+            idx_cond = idx[:, -block_size:] # cant take more than block size tokens as input so am clipping it off
             logits, loss = self(idx) # get the predictions
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim = 1)
@@ -126,7 +156,26 @@ class BigramLanguageModel(nn.Module):
 
         return idx
     
-model = BigramLanguageModel(vocab_size)
+class Head(nn.Module):
+    def __init__(self, n_embedd):
+        super().__init__()
+        self.key = nn.Linear(n_embedd, n_embedd, bias=False)
+        self.query = nn.Linear(n_embedd, n_embedd, bias=False)
+        self.value = nn.Linear(n_embedd, n_embedd, bias=False)
+        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size))) # creating trill parameter which is the lower triangular matrix
+
+    def forward(self, x):
+        B,T,C = x.shape
+        k = self.key(x) # (B,T,C)
+        q = self.query(x) # (B,T,C)
+        w = q @ k.transpose(-2,-1) * C**-0.5 # (B,T,C) @ (B,C,T) -> (B,T,T) # from the formula of attention: attention(Q,K,V) = softmax(QK^T/sqrt(d_k))V
+        w = w.masked_fill(self.tril[:T,:T] == 0, float("-inf")) # mask the upper triangular part ensuring future tokens are not able to communicate with past ones
+        w = F.softmax(w, dim=-1) # normalize the weights via the softmax function: 
+        v = self.value(x) # (B,T,C)
+        out = w @ v # (B,T,T) @ (B,T,C) -> (B,T,C)
+        return out
+    
+model = BigramLanguageModel().to(device)
 logits, loss = model(xb, yb)
 print(logits.shape)
 print(loss)
@@ -134,16 +183,16 @@ print(loss)
 print(decode(model.generate(idx = torch.zeros((1,1), dtype=torch.long), max_new_tokens=100)[0].tolist()))
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
-batch_size = 32
-for steps in range(10000):
-    xb, yb = get_batch("train")
 
+for steps in range(10000):
+    if steps % eval_interval == 0:
+        estimate_loss()
+    xb, yb = get_batch("train")
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 print(loss.item())
 
-print(decode(model.generate(idx = torch.zeros((1,1), dtype=torch.long), max_new_tokens=100)[0].tolist()))
-
-
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(decode(model.generate(idx = context, max_new_tokens=100)[0].tolist()))
