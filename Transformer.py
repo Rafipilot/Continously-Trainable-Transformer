@@ -10,10 +10,10 @@ max_iters = 5000
 eval_interval = 300
 learning_rate = 3e-4
 eval_iters = 200
-n_embedd = 48
+n_embedd = 384 # embedding dimension for each token
 n_layer = 6 # means every head has 384/6 dim
-n_head = 6
-dropout = 0.2
+n_head = 6 # number of heads in multi-head attention
+dropout = 0.2 # dropout is esentially a technique to prevent overfitting by randomly disabling some neural connections during training
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
@@ -99,7 +99,7 @@ class FeedForward(nn.Module):
     def __init__(self, n_embedd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embedd, 4 * n_embedd),
+            nn.Linear(n_embedd, 4 * n_embedd), # not entirely sure why 4x, but it seems to be a common practice
             nn.ReLU(),
             nn.Linear(4 * n_embedd, n_embedd),
             nn.Dropout(dropout),
@@ -108,6 +108,7 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# our first transformer block
 class Block(nn.Module):
     def __init__(self, n_embedd, n_head):
         super().__init__()
@@ -123,21 +124,26 @@ class Block(nn.Module):
         return x
 
 # Language model
+# The BigramLanguageModel is a simple next token prediction model that when combined with the transformer blocks can learn complex patterns in the data.
+# B,T,C stands for Batch size, Time steps (sequence length), and Channels (features) = x.shape where x is the input tensor.
+# And this is essentially the dimensions of the input tensor
+
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embedd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embedd)
-        self.blocks = nn.Sequential(*[Block(n_embedd, n_head=n_head) for _ in range(n_layer)])
-        self.lm_head = nn.Linear(n_embedd, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embedd) # build up a token embedding table that maps each token to an embedding vector
+        self.position_embedding_table = nn.Embedding(block_size, n_embedd) # positional encoding embedding table to give the model a sense of the position of each token in the sequence
+        self.blocks = nn.Sequential(*[Block(n_embedd, n_head=n_head) for _ in range(n_layer)]) # Transformer blocks stacked together
+        self.lm_head = nn.Linear(n_embedd, vocab_size) # final linear layer to project the output of the transformer blocks to the vocabulary size for next token prediction
 
     def forward(self, idx, targets=None):
-        B, T = idx.shape
+        B, T = idx.shape # Idx is the input tensor but different from the input to the transformer blocks because 
         token_emb = self.token_embedding_table(idx)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         x = token_emb + pos_emb
         x = self.blocks(x)
-        logits = self.lm_head(x)
+        logits = self.lm_head(x) # logits are the raw scores for each token in the vocab at each pos in the sequence corresponding to the
 
         loss = None
         if targets is not None:
@@ -149,11 +155,11 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -block_size:]
+            idx_cond = idx[:, -block_size:] # we are making sure to only use the last block as context not the entire sequence
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :]
+            logits = logits[:, -1, :]# get the last logit prediction for the next token
             probs = F.softmax(logits, dim=1)
-            idx_next = torch.multinomial(probs, num_samples=1)
+            idx_next = torch.multinomial(probs, num_samples=1) # get the next token by sampling from the probabilities
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 

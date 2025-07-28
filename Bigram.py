@@ -8,11 +8,12 @@ block_size = 8
 batch_size = 32
 max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-3
+learning_rate = 3e-4
 eval_iters = 200
 n_embedd = 32
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device: ", device)
 
 # Load dataset
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
