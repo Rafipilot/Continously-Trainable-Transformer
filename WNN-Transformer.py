@@ -2,6 +2,7 @@ import requests
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import ao_core as ao
 
 """
 KEY POINTS:
@@ -50,13 +51,13 @@ def encode(s): return [stoi[c] for c in s]
 def decode(l): return ''.join([itos[i] for i in l])
 
 data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9 * len(data)) 
+n = int(0.9 * len(data))
 train_data, test_data = data[:n], data[n:]
 
 # Batch generation
 def get_batch(split):
     data = train_data if split == "train" else test_data
-    ix = torch.randint(len(data) - block_size, (batch_size,)) # generates a 1 dim tensor of length batch_size and each is in range from 0 to len(data)-blocksize 
+    ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i + block_size] for i in ix])
     y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
     return x.to(device), y.to(device)
@@ -65,8 +66,7 @@ def get_batch(split):
 @torch.no_grad() # telling torch that we are not doing backprop so it doesn't need to track gradients and can be more efficent
 def estimate_loss():
     out = {}
-    model.eval() # switch off dropout 
-    ## essentailly here we are calculating loss for 200 iterations then getting mean to reduce random error/noise
+    model.eval()
     for split in ["train", "test"]:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
@@ -74,49 +74,13 @@ def estimate_loss():
             _, loss = model(xb, yb)
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train() # switch back on as we are transitioning back to training
+    model.train()
     return out
 
 # Model components
 class Head(nn.Module):
-    """
-            Attention Head Theory
-
-            The attention head is a core building block of the transformer architecture
-            it gives them the ability to model dependencies across arbitrary positions in a sequence.
-
-            Imagine we have a sequence of token embeddings {x1, x2, ..., xn}.
-            For each position at n we want to compute a new represenation that is the weighted sum
-            of all token representations {x1, x2, ..., xn}.
-            The weight assinged to each other position p should refect how relavent xp is when we are position n
-
-            This can be done in 3 simple steps
-            Query -> represent what that token is lookinhg for at position t
-            Key -> what does each position p- offer
-            Value -> What information does the token rerieve at position p
-
-            All of these are high dimensional vectors 
-
-            To do this we can for each position n
-            Compute a query vector qn
-            Compute a key vector kp for every position where s is less than t (for token pred)
-            Score each key against the query with score = qn * kp
-            Normalize via the softmax to get attention weights alpha(n,p)
-            Compute the new representaiton where xt is the sum from p=1 to n of alpha (n,p) * vp where value is the value vector at p
-            Vt
-
-            The value vector carries semantic information about that token
-            
-            Xt is the raw input to the attention head it encodes what the token appears at position n 
-            and where is the sequence it lies
-    """
     def __init__(self, head_size):
         super().__init__()
-
-        """
-        For referece the nn.Linear layer is a fully connected layer that is essentially a one layer neural network
-        """
-
         self.key = nn.Linear(n_embedd, head_size, bias=False)
         self.query = nn.Linear(n_embedd, head_size, bias=False)
         self.value = nn.Linear(n_embedd, head_size, bias=False)
@@ -124,7 +88,7 @@ class Head(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        B, T, C = x.shape 
+        B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
         w = q @ k.transpose(-2, -1) * C **-0.5 # comes from the scaled dot-product attention formula 
@@ -133,6 +97,35 @@ class Head(nn.Module):
         w = self.dropout(w)
         v = self.value(x)
         return w @ v
+
+class weightlessNeuralNetwork():
+    def __init__(self):
+        self.WNN = ao.Agent(Arch=ao.Arch(arch_i=[64], arch_z=[64]))
+
+    def forward(self, x):
+        output=[]
+        print("forward wnn")
+        for inp in x:
+            out1=[]
+            for input in inp:
+                out = self.WNN.next_state(input.cpu(), unsequenced=True)
+                out1.append(out)
+            output.append(out1)
+        self.WNN.reset_state()
+        #print("return shape: ", output.shape)
+        #print("set: ", output[0])
+        return output
+    
+    
+    
+    def train(self, x, y):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+ 
+        for inp in x:
+            for input in inp:
+                self.WNN.next_state(input.cpu(), y, unsequenced=True)
+        self.WNN.reset_state()
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
@@ -150,7 +143,7 @@ class FeedForward(nn.Module):
     def __init__(self, n_embedd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embedd, 4 * n_embedd), # not entirely sure why 4x, but it seems to be a common practice
+            nn.Linear(n_embedd, 4 * n_embedd), # 4x projection is a common practice to increase complexity
             nn.ReLU(),
             nn.Linear(4 * n_embedd, n_embedd),
             nn.Dropout(dropout),
@@ -166,12 +159,15 @@ class Block(nn.Module):
         head_size = n_embedd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embedd)
+        self.WNN = weightlessNeuralNetwork()  # Using the weightless neural network
         self.ln1 = nn.LayerNorm(n_embedd) # layer normalization
         self.ln2 = nn.LayerNorm(n_embedd)
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
+        #print("input to wnn: ", self.ln1(x).shape)
+        x = x + torch.tensor(self.WNN.forward(self.ln1(x))).to(device)  # Using the weightless neural network
         return x
 
 # Language model
@@ -183,6 +179,7 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(block_size, n_embedd) # positional encoding embedding table to give the model a sense of the position of each token in the sequence
         self.blocks = nn.Sequential(*[Block(n_embedd, n_head=n_head) for _ in range(n_layer)]) # Transformer blocks stacked together
         self.lm_head = nn.Linear(n_embedd, vocab_size) # final linear layer to project the output of the transformer blocks to the vocabulary size for next token prediction
+
 
     def forward(self, idx, targets=None):
         B, T = idx.shape # Idx is the input tensor but different from the input to the transformer blocks because 
@@ -220,7 +217,9 @@ for step in range(max_iters):
         print(f"Step {step}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
 
     xb, yb = get_batch("train")
-    logits, loss = model(xb, yb) # logits are the scores for each token
+    logits, loss = model(xb, yb)
+    #TODO add WNN training here
+    weightlessNeuralNetwork.train(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
