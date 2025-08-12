@@ -229,5 +229,5 @@ torch.save(model.state_dict(), "bigram_language_model.pth")
 
 # Text generation
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-generated = model.generate(context, max_new_tokens=100)[0].tolist()
+generated = model.generate(context, max_new_tokens=5)[0].tolist()
 print(decode(generated))

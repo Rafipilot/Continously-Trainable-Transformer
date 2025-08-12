@@ -22,7 +22,7 @@ KEY POINTS:
 # Hyperparameters
 block_size = 64 # how many tokens to predict
 batch_size = 256 # how many in parralel training examples to run
-max_iters = 5000
+max_iters = 1000
 eval_interval = 300
 learning_rate = 3e-4
 eval_iters = 200
@@ -132,18 +132,19 @@ class weightlessNeuralNetwork():
     def forward(self, input):
         B,T,C = input.shape
         
-        wnn_out = []
+
         print("input shape: ", input.shape)
-        input = torch.flatten(input, start_dim=0, end_dim=1) # gets me to (B*T, C)
-        for i, row in enumerate(torch.unbind(input, 0)): # iterate over the B*T dim
-            row = row.flatten().cpu().detach().numpy()
-            print("row: ", row)
-            print("row shape: ", row.shape) # needs to be (64)
-            wnn_out.append(self.WNN.next_state(row)) 
-        wnn_out = torch.tensor(wnn_out, dtype=torch.float32, device=device)
-        wnn_out=wnn_out.reshape(B,T,-1)
-        print("wnn out shape: ", wnn_out.shape)
-        return wnn_out
+
+        row = self.float_to_bin(input[0,0].cpu().detach().numpy()) # take only c dim since WNN are stateful so no point wasting compute on inference for same items
+        print("row shape: ", row.shape)
+        out = self.WNN.next_state(row) # Note: no reset states since sequence is essential here
+        print("raw out shape: ", out.shape)
+        
+        out = torch.tensor(out, dtype=torch.float32, device=input.device)
+        out = out.unsqueeze(0).unsqueeze(0).expand(B, T, C)# add other dims back in
+        print("out shape: ", out.shape)
+        return out
+        
 
     def train(self, x, y):
         print(len(x))
@@ -151,35 +152,15 @@ class weightlessNeuralNetwork():
         B,T,C = x.shape
         x = x.reshape(-1, C)  # shape (B*T, C)
         y = y.reshape(-1) # shape (b*T,)
-        print("need ", len(x), "iterations")
         print("shape x: ", x.shape)
         print("shape y: ", y.shape)
-        print("x subset: ", x[:5])
-        print("y subset: ", y[:5])
-        #for inp, lbl in zip(x, y):
-    #         for input,label in zip(inp,lbl):
-                    
-    #                 input = input.flatten().cpu().numpy()
-    #                 #label = label.flatten().cpu().numpy()
-    #                 # for i, l in zip(input, label):
-    #                 #     input_flat.append(i)
-    #                 #     label_flat.append(l)
-    #    # input_flat = self.float_to_bin(np.array(input_flat))
 
-        # input = self.float_to_bin(x.cpu().numpy())
-        # label = self.float_to_bin(y.cpu().numpy())
         input=[]
         label=[]
         for inp, lbl in zip(x,y):
             input.append(self.float_to_bin(inp.cpu().numpy()))
             label.append(numToBinary(lbl.cpu().numpy()))         
-        # print("len inp ",  len(input))
-        # #print("shape inp: ", input.shape)
-        # print("inp subset: ", input[:5])
 
-        # print("len lbl: ", len(label))
-        # print("lbl subset: ", label[:5])
-        #print("shape lbl: ", label.shape)
         self.WNN.next_state_batch(input,label)
         self.WNN.reset_state()
         print("finished wnn train")
@@ -310,6 +291,7 @@ with torch.no_grad():  # no gradients in PyTorch
         temp_x = temp_x + block.sa(block.ln1(temp_x))
         temp_x = temp_x + block.ffwd(block.ln2(temp_x))
                 # WNN have static lookup table: training them multiple times on same data doesnt change outcome
+                # This means I will train them only once seperatly outside of the main training loop
         print("start train")
         now = datetime.now()
         block.WNN.train(temp_x, yb)
@@ -322,5 +304,5 @@ for block in model.blocks: # we want to use the wnn forward when generating text
     block.use_wnn=True
 
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-generated = model.generate(context, max_new_tokens=5)[0].tolist()
+generated = model.generate(context, max_new_tokens=10)[0].tolist()
 print(decode(generated))
