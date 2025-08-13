@@ -112,7 +112,8 @@ class Head(nn.Module):
         B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
-        w = q @ k.transpose(-2, -1) * C **-0.5 # comes from the scaled dot-product attention formula 
+        head_dim = q.size(-1)  # this is head_size
+        w = q @ k.transpose(-2, -1) * (head_dim ** -0.5)# comes from the scaled dot-product attention formula 
         w = w.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
         w = self.dropout(w)
@@ -125,25 +126,26 @@ class weightlessNeuralNetwork():
 
     def float_to_bin(self, arr, threshold=0):  # The most basic conversion function. if input is greater than threshold, it will be 1, else 0
         """Converts a float32 embedding to a binary embedding."""
+
         binary_embedding = np.where(arr > threshold, 1, 0)
         return binary_embedding
 
 
     def forward(self, input):
         B,T,C = input.shape
+        input = input.cpu().detach().numpy() 
+        outputs = np.zeros(input.shape, dtype=np.float32)
         
+        for b in range(B):
+            for t in range(T):
+                inp = np.array(input[b,t])
+                print("inp: ", inp)
+                inp= self.float_to_bin(inp)
+                out = self.WNN.next_state(inp)
+                outputs[b,t] = out
 
-        print("input shape: ", input.shape)
-
-        row = self.float_to_bin(input[0,0].cpu().detach().numpy()) # take only c dim since WNN are stateful so no point wasting compute on inference for same items
-        print("row shape: ", row.shape)
-        out = self.WNN.next_state(row) # Note: no reset states since sequence is essential here
-        print("raw out shape: ", out.shape)
-        
-        out = torch.tensor(out, dtype=torch.float32, device=input.device)
-        out = out.unsqueeze(0).unsqueeze(0).expand(B, T, C)# add other dims back in
-        print("out shape: ", out.shape)
-        return out
+        outputs = torch.from_numpy(outputs).to(device)
+        return outputs
         
 
     def train(self, x, y):
@@ -207,7 +209,7 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x))
         if self.use_wnn: # not using wnn for training only for inference 
 
-            x= self.WNN.forward(x)
+            x= x+self.WNN.forward(x)
             print("output: ", x.shape)
         return x
 
@@ -255,6 +257,7 @@ class BigramLanguageModel(nn.Module):
             print("DEBUG: probs dtype/device:", probs.dtype, probs.device)
             assert probs.dim() == 2, "probs must be 2-D (B, V); got dim=" + str(probs.dim())
             idx_next = torch.multinomial(probs, num_samples=1) # get the next token by sampling from the probabilities
+            print("idx next: ", idx_next)
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
@@ -304,5 +307,5 @@ for block in model.blocks: # we want to use the wnn forward when generating text
     block.use_wnn=True
 
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-generated = model.generate(context, max_new_tokens=10)[0].tolist()
+generated = model.generate(context, max_new_tokens=20)[0].tolist()
 print(decode(generated))
