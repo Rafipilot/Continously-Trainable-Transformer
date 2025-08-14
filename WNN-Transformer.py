@@ -22,7 +22,7 @@ KEY POINTS:
 # Hyperparameters
 block_size = 64 # how many tokens to predict
 batch_size = 256 # how many in parralel training examples to run
-max_iters = 1000
+max_iters = 50000
 eval_interval = 300
 learning_rate = 3e-4
 eval_iters = 200
@@ -58,7 +58,7 @@ chars = sorted(list(set(response.text)))
 vocab_size = len(chars) # is 65 for current dataset (tiny shakjespere)
 
 def numToBinary(num):
-    binary = format(num, "064b")
+    binary = format(num, f"0{block_size}b")
     return list(binary)
 
 def binaryToNum(binary):
@@ -122,40 +122,42 @@ class Head(nn.Module):
 
 class weightlessNeuralNetwork():
     def __init__(self):
-        self.WNN = ao.Agent(Arch=ao.Arch(arch_i=[64], arch_z=[64]))
+        #self.WNN = ao.Agent(Arch=ao.Arch(arch_i=[block_size], arch_z=[block_size], connector_function="rand_conn", connector_parameters=[int(block_size*0.6), block_size, 40, int(block_size*0.6)]))
+        self.WNN = ao.Agent(Arch=ao.Arch(arch_i=[block_size], arch_z=[block_size]))
+        self.lookup_map = []
 
     def float_to_bin(self, arr, threshold=0):  # The most basic conversion function. if input is greater than threshold, it will be 1, else 0
         """Converts a float32 embedding to a binary embedding."""
-
         binary_embedding = np.where(arr > threshold, 1, 0)
         return binary_embedding
-
 
     def forward(self, input):
         B,T,C = input.shape
         input = input.cpu().detach().numpy() 
         outputs = np.zeros(input.shape, dtype=np.float32)
-        
+        if len(self.lookup_map) >=int(block_size):
+            self.lookup_map.pop(0) # roll the context window
         for b in range(B):
             for t in range(T):
-                inp = np.array(input[b,t])
-                print("inp: ", inp)
-                inp= self.float_to_bin(inp)
-                out = self.WNN.next_state(inp)
+                if t >= len(self.lookup_map):
+                    inp = np.array(input[b,t])
+                    inp= self.float_to_bin(inp)
+                    out = self.WNN.next_state(inp)
+                    self.lookup_map.append(out)
+                else:
+                    out = self.lookup_map[t]
+
                 outputs[b,t] = out
+            self.WNN.reset_state() # reset the state of the agent in between batches
 
         outputs = torch.from_numpy(outputs).to(device)
         return outputs
         
 
     def train(self, x, y):
-        print(len(x))
-
         B,T,C = x.shape
         x = x.reshape(-1, C)  # shape (B*T, C)
         y = y.reshape(-1) # shape (b*T,)
-        print("shape x: ", x.shape)
-        print("shape y: ", y.shape)
 
         input=[]
         label=[]
@@ -163,7 +165,7 @@ class weightlessNeuralNetwork():
             input.append(self.float_to_bin(inp.cpu().numpy()))
             label.append(numToBinary(lbl.cpu().numpy()))         
 
-        self.WNN.next_state_batch(input,label)
+        self.WNN.next_state_batch(input,label) # In each batch sequence is vital
         self.WNN.reset_state()
         print("finished wnn train")
 
@@ -194,23 +196,27 @@ class FeedForward(nn.Module):
 
 # our first transformer block
 class Block(nn.Module):
-    def __init__(self, n_embedd, n_head, use_wnn=False):
+    def __init__(self, n_embedd, n_head, use_wnn=False, wnn_block=False):
         super().__init__()
         head_size = n_embedd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embedd)
-        self.WNN = weightlessNeuralNetwork()  # Using the weightless neural network
+        self.wnn_block = wnn_block
+        self.use_wnn = use_wnn # here as more of a placeholder
+        if wnn_block:
+            self.WNN = weightlessNeuralNetwork()  # Using the weightless neural network
         self.ln1 = nn.LayerNorm(n_embedd) # layer normalization
         self.ln2 = nn.LayerNorm(n_embedd)
-        self.use_wnn = use_wnn
+       
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
-        if self.use_wnn: # not using wnn for training only for inference 
+        if self.wnn_block:
+            if self.use_wnn: # not using wnn for training only for inference 
 
-            x= x+self.WNN.forward(x)
-            print("output: ", x.shape)
+                x= x+self.WNN.forward(x)
+                print("output: ", x.shape)
         return x
 
 # Language model
@@ -220,7 +226,13 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embedd) # build up a token embedding table that maps each token to an embedding vector
         self.position_embedding_table = nn.Embedding(block_size, n_embedd) # positional encoding embedding table to give the model a sense of the position of each token in the sequence
-        self.blocks = nn.Sequential(*[Block(n_embedd, n_head=n_head) for _ in range(n_layer)]) # Transformer blocks stacked together
+        blocks = []
+        for i in range(n_layer):
+            if i != n_layer-1:
+                blocks.append(Block(n_embedd, n_head=n_head))
+            else:
+                blocks.append(Block(n_embedd, n_head=n_head, wnn_block=True))  # the last block is a wnn block only
+        self.blocks = nn.Sequential(*blocks) # The star unpacks the list so it can be used for the nn.Sequential
         self.lm_head = nn.Linear(n_embedd, vocab_size) # final linear layer to project the output of the transformer blocks to the vocabulary size for next token prediction
 
 
@@ -239,6 +251,30 @@ class BigramLanguageModel(nn.Module):
             targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
         return logits, loss
+    
+    def trainWNN(self, label):
+        """
+            Here is the magic. WNNs are continously trainabkle so we can introduce this trainWNN function at any point even after training and apply new labels.
+            This is a much stronger kind of continous learning the RLHF since we are changing a meaningful proption of the underlying weights of the model.
+        """
+        for i, token in enumerate(label):
+            if i==0: # if we are at the first token we cant really teach it anything since no previous context
+                continue 
+            previous_tokens = label[:i]
+            current_label = token
+            current_label_encoded = encode(current_label)
+            previous_tokens_encoded=[]
+            for previous_token in previous_tokens:
+                previous_tokens_encoded.append(encode(previous_token))
+
+            emb = self.token_embedding_table(current_label_encoded) + self.position_embedding_table(current_label_encoded)
+
+            for i, block in enumerate(self.blocks):
+                if i == len(self.blocks)-1:
+                    x= emb + block.sa.forward(emb)
+                    x = x + block.ffwd.forward(x)
+                    block.WNN.train(x, previous_tokens_encoded)
+
 
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
@@ -250,12 +286,6 @@ class BigramLanguageModel(nn.Module):
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :]   # expect (B, vocab_size)
             probs = F.softmax(logits, dim=1)
-
-            print("DEBUG: idx shape:", idx.shape)             # (B, cur_seq_len)
-            print("DEBUG: logits shape:", logits.shape)       # should be (B, vocab_size)
-            print("DEBUG: probs shape:", probs.shape)         # should be (B, vocab_size)
-            print("DEBUG: probs dtype/device:", probs.dtype, probs.device)
-            assert probs.dim() == 2, "probs must be 2-D (B, V); got dim=" + str(probs.dim())
             idx_next = torch.multinomial(probs, num_samples=1) # get the next token by sampling from the probabilities
             print("idx next: ", idx_next)
             idx = torch.cat((idx, idx_next), dim=1)
@@ -263,22 +293,23 @@ class BigramLanguageModel(nn.Module):
 
 # Training
 model = BigramLanguageModel().to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+model.load_state_dict(torch.load("WNNTransformer.pth", weights_only=False))
+#optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for step in range(max_iters):
-    if step % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"Step {step}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
+# for step in range(max_iters):
+#     if step % eval_interval == 0:
+#         losses = estimate_loss()
+#         print(f"Step {step}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
 
-    xb, yb = get_batch("train")
+#     xb, yb = get_batch("train")
     
 
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-# save the weights
-torch.save(model.state_dict(), "bigram_language_model.pth")
+#     logits, loss = model(xb, yb)
+#     optimizer.zero_grad(set_to_none=True)
+#     loss.backward()
+#     optimizer.step()
+
+# torch.save(model.state_dict(), "WNNTransformer.pth")
 
 # Train WNN once at the end
 
@@ -290,22 +321,27 @@ emb = model.token_embedding_table(xb) + model.position_embedding_table(torch.ara
 # Train WNN on block outputs
 with torch.no_grad():  # no gradients in PyTorch
     temp_x = emb
-    for block in model.blocks:
-        temp_x = temp_x + block.sa(block.ln1(temp_x))
-        temp_x = temp_x + block.ffwd(block.ln2(temp_x))
-                # WNN have static lookup table: training them multiple times on same data doesnt change outcome
-                # This means I will train them only once seperatly outside of the main training loop
-        print("start train")
-        now = datetime.now()
-        block.WNN.train(temp_x, yb)
-        print("finished train")
-        print("time for wnn train: ", datetime.now()-now)
+    for i, block in enumerate(model.blocks):
+        if i == n_layer-1: # Since only WNN in the last block only need to train the wnn in that layer
+            temp_x = temp_x + block.sa(block.ln1(temp_x))
+            temp_x = temp_x + block.ffwd(block.ln2(temp_x))
+                    # WNN have static lookup table: training them multiple times on same data doesnt change outcome
+                    # This means I will train them only once seperatly outside of the main training loop
+            print("start train")
+            now = datetime.now()
+            block.WNN.train(temp_x, yb)
+            print("finished train")
+            print("time for wnn train: ", datetime.now()-now)
 
 # Text generation
 
 for block in model.blocks: # we want to use the wnn forward when generating text
     block.use_wnn=True
 
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
+
+context = torch.tensor([encode("Percius")], dtype=torch.long, device=device)
 generated = model.generate(context, max_new_tokens=20)[0].tolist()
+
+model.trainWNN("The capital of France is Paris")   # active realtime training!!
+
 print(decode(generated))

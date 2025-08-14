@@ -18,11 +18,11 @@ KEY POINTS:
    """
 
 # Hyperparameters
-block_size = 64 # how many tokens to predict
+block_size = 64 # essentially the context window
 batch_size = 256 # how many in parralel training examples to run
-max_iters = 5000
-eval_interval = 300
-learning_rate = 3e-4
+max_iters = 20000 # training iters
+eval_interval = 300 # how often to calc losses
+learning_rate = 3e-4 
 eval_iters = 200
 n_embedd = 64 # embedding dimension for each token
 n_layer = 6 # is the number of transformer blocks
@@ -127,7 +127,8 @@ class Head(nn.Module):
         B, T, C = x.shape 
         k = self.key(x)
         q = self.query(x)
-        w = q @ k.transpose(-2, -1) * C **-0.5 # comes from the scaled dot-product attention formula 
+        head_dim = q.size(-1)  # this is head_size
+        w = q @ k.transpose(-2, -1) * (head_dim ** -0.5)# comes from the scaled dot-product attention formula 
         w = w.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
         w = self.dropout(w)
@@ -212,22 +213,24 @@ class BigramLanguageModel(nn.Module):
 
 # Training
 model = BigramLanguageModel().to(device)
+model.load_state_dict(torch.load("WNNTransformer.pth", weights_only=False))
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for step in range(max_iters):
-    if step % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"Step {step}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
+# for step in range(max_iters):
+#     if step % eval_interval == 0:
+#         losses = estimate_loss()
+#         print(f"Step {step}: Train loss {losses['train']:.4f}, Test loss {losses['test']:.4f}")
 
-    xb, yb = get_batch("train")
-    logits, loss = model(xb, yb) # logits are the scores for each token
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-# save the weights
-torch.save(model.state_dict(), "bigram_language_model.pth")
+#     xb, yb = get_batch("train")
+#     logits, loss = model(xb, yb) # logits are the scores for each token
+#     optimizer.zero_grad(set_to_none=True)
+#     loss.backward()
+#     optimizer.step()
+# # save the weights
+# torch.save(model.state_dict(), "bigram_language_model.pth")
 
 # Text generation
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-generated = model.generate(context, max_new_tokens=20)[0].tolist()
+context = torch.tensor([encode("Rafayel: ")], dtype=torch.long, device=device)
+generated = model.generate(context, max_new_tokens=200)[0].tolist()
 print(decode(generated))
