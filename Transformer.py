@@ -24,8 +24,8 @@ max_iters = 20000 # training iters
 eval_interval = 300 # how often to calc losses
 learning_rate = 3e-4 
 eval_iters = 200
-n_embedd = 64 # embedding dimension for each token
-n_layer = 6 # is the number of transformer blocks
+n_embedd = 128 # embedding dimension for each token
+n_layer = 8 # is the number of transformer blocks
 n_head = 8 # number of heads in multi-head attention
 dropout = 0.2 # dropout is esentially a technique to prevent overfitting by randomly disabling some neural connections during training
 
@@ -213,7 +213,7 @@ class BigramLanguageModel(nn.Module):
 
 # Training
 model = BigramLanguageModel().to(device)
-model.load_state_dict(torch.load("WNNTransformer.pth", weights_only=False))
+model.load_state_dict(torch.load("WNNTransformer128Emed50kIters8Layers.pth", weights_only=False))
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
