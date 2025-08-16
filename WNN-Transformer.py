@@ -155,7 +155,6 @@ class weightlessNeuralNetwork():
                 outputs[b,t] = out
             self.WNN.reset_state() # reset the state of the agent in between batches
         print("time for wnn: ", datetime.now()-now)
-        print("num next states: ", num_next_states)
         outputs = torch.from_numpy(outputs).to(device)
         return outputs
         
@@ -222,7 +221,6 @@ class Block(nn.Module):
             if self.use_wnn: # not using wnn for training only for inference 
 
                 x= x + self.WNN.forward(x)
-                print("output: ", x.shape)
         return x
 
 # Language model
@@ -297,7 +295,6 @@ class BigramLanguageModel(nn.Module):
             logits = logits[:, -1, :]   # expect (B, vocab_size)
             probs = F.softmax(logits, dim=1)
             idx_next = torch.multinomial(probs, num_samples=1) # get the next token by sampling from the probabilities
-            print("idx next: ", idx_next)
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
@@ -348,7 +345,7 @@ with torch.no_grad():  # no gradients in PyTorch
 for block in model.blocks: # we want to use the wnn forward when generating text
     block.use_wnn=True
 
-max_new_tokens = 1
+max_new_tokens = 100
 context = torch.tensor([encode("PERCIUS:")], dtype=torch.long, device=device)
 now = datetime.now()
 generated = model.generate(context, max_new_tokens)[0].tolist()
@@ -358,3 +355,7 @@ print(decode(generated))
 print("time to generate ", max_new_tokens , " : ", datetime.now()-now, "s")
 
 model.trainWNN("The capital of France is Paris")   # active realtime training!!
+
+context = torch.tensor([encode("The capital of France is ")], dtype=torch.long, device=device)
+generated = model.generate(context, max_new_tokens)[0].tolist()
+print(decode(generated))
