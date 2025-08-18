@@ -2,6 +2,7 @@ import requests
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from datasets import load_dataset
 
 """
 KEY POINTS:
@@ -33,23 +34,29 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
 # Load dataset
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-response = requests.get(url)
-text = response.text
+dataset = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="train")["text"]
+dataset = "\n".join(dataset)
 
-with open("tinyshakespeare.txt", "w", encoding="utf-8") as f:
-    f.write(text)
-
+min_freq = 50
+char_counts ={}
+for char in dataset:
+    char_counts[char] = char_counts.get(char, 0) +1
 # Tokenization
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
+chars = set()
+for char, count in char_counts.items():
+    if count >min_freq:
+        chars.add(char)
+chars = sorted(chars)
+vocab_size = len(chars) # is 65 for current dat   zaset (tiny shakjespere)
+print("vocab size: ", vocab_size)
+
 stoi = {ch: i for i, ch in enumerate(chars)} # string to index
 itos = {i: ch for i, ch in enumerate(chars)} # index to string
 
-def encode(s): return [stoi[c] for c in s]
+def encode(s): return [stoi[c] for c in s if c in stoi]
 def decode(l): return ''.join([itos[i] for i in l])
 
-data = torch.tensor(encode(text), dtype=torch.long)
+data = torch.tensor(encode(dataset), dtype=torch.long)
 n = int(0.9 * len(data)) 
 train_data, test_data = data[:n], data[n:]
 
@@ -213,7 +220,7 @@ class BigramLanguageModel(nn.Module):
 
 # Training
 model = BigramLanguageModel().to(device)
-model.load_state_dict(torch.load("WNNTransformer128Emed50kIters8Layers.pth", weights_only=False))
+model.load_state_dict(torch.load("WNNTransformerWikiDataset128Emed5kIters8Layers.pth", weights_only=False))
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -231,6 +238,6 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 # torch.save(model.state_dict(), "bigram_language_model.pth")
 
 # Text generation
-context = torch.tensor([encode("Rafayel: ")], dtype=torch.long, device=device)
+context = torch.tensor([encode("H")], dtype=torch.long, device=device)
 generated = model.generate(context, max_new_tokens=200)[0].tolist()
 print(decode(generated))

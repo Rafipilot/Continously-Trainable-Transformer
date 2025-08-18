@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import ao_core as ao
 import numpy as np
 from datetime import datetime
+from datasets import load_dataset
 """
 KEY POINTS:
 1. The BigramLanguageModel is a simple next token prediction model that when combined with the transformer blocks can learn complex patterns in the data.
@@ -32,30 +33,43 @@ n_head = 8 # number of heads in multi-head attention
 dropout = 0.2 # dropout is esentially a technique to prevent overfitting by randomly disabling some neural connections during training
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
 print(f"Using device: {device}")
 
 # Load dataset
 import requests, time
 
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+#url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
-for attempt in range(5):  # Try up to 5 times
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        break
-    except requests.exceptions.RequestException as e:
-        print(f"Attempt {attempt+1} failed: {e}")
-        time.sleep(2)  # Wait before retry
-else:
-    raise RuntimeError("Failed to download dataset after multiple attempts.")
+# for attempt in range(5):  # Try up to 5 times
+#     try:
+#         response = requests.get(url, timeout=10)
+#         response.raise_for_status()
+#         break
+#     except requests.exceptions.RequestException as e:
+#         print(f"Attempt {attempt+1} failed: {e}")
+#         time.sleep(2)  # Wait before retry
+# else:
+#     raise RuntimeError("Failed to download dataset after multiple attempts.")
 
-with open("tinyshakespeare.txt", "w", encoding="utf-8") as f:
-    f.write(response.text)
+# with open("tinyshakespeare.txt", "w", encoding="utf-8") as f:
+#     f.write(response.text)
 
+dataset = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="train")["text"]
+dataset = "\n".join(dataset)
+
+min_freq = 50
+char_counts ={}
+for char in dataset:
+    char_counts[char] = char_counts.get(char, 0) +1
 # Tokenization
-chars = sorted(list(set(response.text)))
-vocab_size = len(chars) # is 65 for current dataset (tiny shakjespere)
+chars = set()
+for char, count in char_counts.items():
+    if count >min_freq:
+        chars.add(char)
+chars = sorted(chars)
+vocab_size = len(chars) # is 65 for current dat   zaset (tiny shakjespere)
+print("vocab size: ", vocab_size)
 
 def numToBinary(num):
     binary = format(int(num), f"0{int(n_embedd)}b")
@@ -67,10 +81,10 @@ def binaryToNum(binary):
 stoi = {ch: i for i, ch in enumerate(chars)} # string to index
 itos = {i: ch for i, ch in enumerate(chars)} # index to string
 
-def encode(s): return [stoi[c] for c in s]
+def encode(s): return [stoi[c] for c in s if c in stoi]
 def decode(l): return ''.join([itos[i] for i in l])
 
-data = torch.tensor(encode(response.text), dtype=torch.long)
+data = torch.tensor(encode(dataset), dtype=torch.long)
 n = int(0.9 * len(data))
 train_data, test_data = data[:n], data[n:]
 
@@ -258,8 +272,8 @@ class BigramLanguageModel(nn.Module):
     
     def trainWNN(self, label):
         """
-            Here is the magic. WNNs are continously trainabkle so we can introduce this trainWNN function at any point even after training and apply new labels.
-            This is a much stronger kind of continous learning the RLHF since we are changing a meaningful proption of the underlying weights of the model.
+            Here is the magic. WNNs are continously trainabkle so we can introduce this trainWNN function at any point even after training and apply new labels in realtime.
+            This is a much stronger kind of continous learning than RLHF since we are changing a meaningful proption of the underlying weights of the model instead of a small subset.
         """
         xs=torch.tensor([]).to(device)
         ys= torch.tensor([]).to(device)
@@ -273,8 +287,9 @@ class BigramLanguageModel(nn.Module):
             for previous_token in previous_tokens:
                 previous_tokens_encoded = torch.cat((previous_tokens_encoded, torch.tensor(encode(previous_token)).to(device))).to(device)
 
-            emb = self.token_embedding_table(current_label_encoded) + self.position_embedding_table(current_label_encoded)
-            emb = emb.to(device).unsqueeze(0) # adding the batch dimension ( of one ) so it doesnt break
+            position_locations = torch.arange(0, len(current_label), device=device)
+            emb = self.token_embedding_table(current_label_encoded) + self.position_embedding_table(position_locations.to(device))
+            emb = emb.unsqueeze(0).to(device) # adding the batch dimension ( of one ) so it doesnt break
             for i, block in enumerate(self.blocks):
                 if i == len(self.blocks)-1:
                     x= emb + block.sa.forward(emb)
@@ -300,7 +315,7 @@ class BigramLanguageModel(nn.Module):
 
 # Training
 model = BigramLanguageModel().to(device)
-model.load_state_dict(torch.load("WNNTransformer128Emed50kIters8Layers.pth", weights_only=False))
+model.load_state_dict(torch.load("WNNTransformerWikiDataset128Emed50kIters8Layers.pth", weights_only=False))
 # optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 # for step in range(max_iters):
@@ -316,7 +331,7 @@ model.load_state_dict(torch.load("WNNTransformer128Emed50kIters8Layers.pth", wei
 #     loss.backward()
 #     optimizer.step()
 
-#torch.save(model.state_dict(), "WNNTransformer128Emed50kIters8Layers.pth")
+# torch.save(model.state_dict(), "WNNTransformerWikiDataset128Emed25kIters8Layers.pth")
 
 # Train WNN once at the end
 
@@ -336,7 +351,7 @@ with torch.no_grad():  # no gradients in PyTorch
                     # This means I will train them only once seperatly outside of the main training loop
             print("start train")
             now = datetime.now()
-            block.WNN.train(temp_x, yb)
+            #block.WNN.train(temp_x, yb)
             print("finished train")
             print("time for wnn train: ", datetime.now()-now)
 
@@ -345,8 +360,8 @@ with torch.no_grad():  # no gradients in PyTorch
 for block in model.blocks: # we want to use the wnn forward when generating text
     block.use_wnn=True
 
-max_new_tokens = 100
-context = torch.tensor([encode("PERCIUS:")], dtype=torch.long, device=device)
+max_new_tokens = 20
+context = torch.tensor([encode("The capital of France is ")], dtype=torch.long, device=device)
 now = datetime.now()
 generated = model.generate(context, max_new_tokens)[0].tolist()
 
@@ -356,6 +371,7 @@ print("time to generate ", max_new_tokens , " : ", datetime.now()-now, "s")
 
 model.trainWNN("The capital of France is Paris")   # active realtime training!!
 
+max_new_tokens = 20
 context = torch.tensor([encode("The capital of France is ")], dtype=torch.long, device=device)
 generated = model.generate(context, max_new_tokens)[0].tolist()
 print(decode(generated))
