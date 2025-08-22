@@ -6,6 +6,7 @@ import ao_core as ao
 import numpy as np
 from datetime import datetime
 from datasets import load_dataset
+import time
 """
 KEY POINTS:
 1. The BigramLanguageModel is a simple next token prediction model that when combined with the transformer blocks can learn complex patterns in the data.
@@ -32,15 +33,14 @@ n_layer = 8 # is the number of transformer blocks
 n_head = 8 # number of heads in multi-head attention
 dropout = 0.2 # dropout is esentially a technique to prevent overfitting by randomly disabling some neural connections during training
 
-num_wnn_blocks = 4
-wnn_binary_compression_level = 4 # mostly to increase speed of inference- less neurons
+num_wnn_blocks = 1
+wnn_binary_compression_level = 1 # mostly to increase speed of inference- less neurons
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 print(f"Using device: {device}")
 
 # Load dataset
-import requests, time
 
 # url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 
@@ -320,40 +320,55 @@ class BigramLanguageModel(nn.Module):
             Here is the magic. WNNs are continously trainabkle so we can introduce this trainWNN function at any point even after training and apply new labels in realtime.
             This is a much stronger kind of continous learning than RLHF since we are changing a meaningful proption of the underlying weights of the model instead of a small subset.
         """
+        # Note in the function below there is alot of handling for if on of the tensors are empty. this is because we intially trained the model on tiny shaspeare dataset which has a very small vocab size and so the WNN is not trained on all the tokens in the vocab.
+        with torch.no_grad():  # no gradients in PyTorch
+            for i,block in enumerate(self.blocks):
+                print("Training WNN in block: ", i)
+                if not block.wnn_block:
+                    continue # we only train the WNN specified blocks
+                xs=[] # we are going to collect all the embeddings in this tensor
+                ys= [] # we are going to collect all the labels in this tensor
+                for k, token in enumerate(label, 1):
+                    previous_tokens = label[max(0, k-block_size):k] # all max 64 previous tokens except the current one 
+                    current_label = token
+                    current_label_encoded = torch.tensor(encode(current_label), dtype=torch.long).to(device)
+                    if current_label_encoded.numel() == 0:
+                        continue
+                    skip_due_to_empty = False
+                    previous_tokens_encoded=[]
+                    for previous_token in previous_tokens:
+                        to_add = torch.tensor(encode(previous_token), dtype=torch.long)
+                        if to_add.numel() == 0: # if the token is empty we skip it
+                            skip_due_to_empty = True
+                            continue
+                        else:
+                            previous_tokens_encoded.extend(to_add.to(device))
+                    if skip_due_to_empty:
+                        continue
+                    position_locations = torch.arange(0, len(previous_tokens), device=device, dtype=torch.long)
+                    previous_tokens_encoded = torch.stack(previous_tokens_encoded).to(device) # convert to tensor
 
-        for block in self.blocks:
-            if not block.wnn_block:
-                continue # we only train the WNN specified blocks
-            xs=[]
-            ys= []
-            for k, token in enumerate(label):
-                if k==0: # if we are at the first token we cant really teach it anything since no previous context
-                    continue 
-                previous_tokens = label[max(0, k-block_size):k-1] # all max 64 previous tokens except the current one 
-                current_label = token
-                current_label_encoded = torch.tensor(encode(current_label), dtype=torch.long).to(device)
+                    if previous_tokens_encoded.numel() < block_size:
+                        padd_tensor = torch.full((block_size - previous_tokens_encoded.numel(),), 0, dtype=torch.long, device=device) # padding token  to ensure the time dim is always block_size so no shape issues
+                        previous_tokens_encoded = torch.cat((padd_tensor, previous_tokens_encoded), dim=0)  # pad at the start
+                        position_locations = torch.cat((padd_tensor, position_locations), dim=0)  # pad at the start
+
+                    emb = self.token_embedding_table(previous_tokens_encoded) + self.position_embedding_table(position_locations)
+                    #emb = emb.unsqueeze(0).to(device) # adding the batch dimension ( of one ) so it doesnt break
+                    xs.append(emb)
+                    ys.append(current_label_encoded)
+                xs = torch.stack(xs) # shape (B,T,C)
+                ys = torch.stack(ys) # shape (B,T) 
                 
-                previous_tokens_encoded=torch.tensor([]).to(device)
-                for previous_token in previous_tokens:
-                    previous_tokens_encoded = torch.cat((previous_tokens_encoded, torch.tensor(encode(previous_token)).to(device))).to(device)
-                position_locations = torch.arange(0, len(current_label), device=device)
-                emb = self.token_embedding_table(current_label_encoded) + self.position_embedding_table(position_locations.to(device))
-                #emb = emb.unsqueeze(0).to(device) # adding the batch dimension ( of one ) so it doesnt break
+                print("shape of xs: ", xs.shape, " shape of ys: ", ys.shape)
+                for block in self.blocks[:i+1]: # we want to pass the input through all the blocks up to and including the current one
+                    xs = xs + block.sa(block.ln1(xs))
+                    xs = xs + block.ffwd(block.ln2(xs))
+                #xs = xs.reshape(xs.size(0)*xs.size(1), xs.size(2), xs.size(3))
                 
-                if emb == None or emb.numel() == 0:
-                    print("ERROR: x is empty, skipping this token")
-                    continue
-                xs.append(emb)
-                ys.append(current_label_encoded) # we are appending the current label to the ys list
-            
-            xs = torch.stack(xs).to(device) # convert to tensor
-            xs = xs + block.sa(block.ln1(xs))
-            xs = xs + block.ffwd(block.ln2(xs))
-            #xs = xs.reshape(xs.size(0)*xs.size(1), xs.size(2), xs.size(3))
-            ys = torch.stack(ys).to(device)
-            print("shape of xs: ", xs.shape, " shape of ys: ", ys.shape)
-            if block.wnn_block: # only train the WNN in the block if specified 
-                block.WNN.train(xs, ys) # batch training method
+                
+                if block.wnn_block: # only train the WNN in the block if specified 
+                    block.WNN.train(xs, ys) # batch training method
 
 
     def generate(self, idx, max_new_tokens):
@@ -361,6 +376,7 @@ class BigramLanguageModel(nn.Module):
             block.WNN.lookup_map=[]#n between diff runs reset the lookup map
         for _ in range(max_new_tokens):
             print("generating token: ", _)
+            print("current generated string: ", decode(idx[0].tolist()))
             idx_cond = idx[:, -block_size:] # we are making sure to only use the last block as context not the entire sequence
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :]# get the last logit prediction for the next token
@@ -418,8 +434,8 @@ with torch.no_grad():  # no gradients in PyTorch
 
 # Text generation
 
-max_new_tokens = 120
-context = torch.tensor([encode("The ")], dtype=torch.long, device=device)
+max_new_tokens = 5
+context = torch.tensor([encode("The people")], dtype=torch.long, device=device)
 now = datetime.now()
 generated = model.generate(context, max_new_tokens)[0].tolist()
 print(decode(generated))
@@ -433,12 +449,12 @@ retrain = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="trai
 retrain = "\n".join(retrain)
 print("len retrain: ", len(retrain))
 
-model.trainWNN(retrain[:10000])  # retrain the WNN on new data
+model.trainWNN(retrain[:20000])  # retrain the WNN on new data
 
 print("WNN story state after retraining: ", model.blocks[-1].WNN.WNN.state)
 print("debug external state count: ", model.blocks[-1].WNN.external_state_count) # debug
 max_new_tokens = 120
-context = torch.tensor([encode("The ")], dtype=torch.long, device=device)
+context = torch.tensor([encode("The people")], dtype=torch.long, device=device)
 generated = model.generate(context, max_new_tokens)[0].tolist()
 print(decode(generated))
 
