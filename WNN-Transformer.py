@@ -7,6 +7,8 @@ import numpy as np
 from datetime import datetime
 from datasets import load_dataset
 import time
+from sklearn.decomposition import PCA
+import ast
 """
 KEY POINTS:
 1. The BigramLanguageModel is a simple next token prediction model that when combined with the transformer blocks can learn complex patterns in the data.
@@ -33,10 +35,15 @@ n_layer = 8 # is the number of transformer blocks
 n_head = 8 # number of heads in multi-head attention
 dropout = 0.2 # dropout is esentially a technique to prevent overfitting by randomly disabling some neural connections during training
 
-num_wnn_blocks = 1
-wnn_binary_compression_level = 1 # mostly to increase speed of inference- less neurons
+num_wnn_blocks = 6
+compression = False # disables compression. For small scale testing we would probably want compression to reduce the inference time of the WNN but on larger models it would be ideal to disable compression to get the best performance
 
+wnn_binary_compression_level = 4 # mostly to increase speed of inference- less neurons
+
+if not compression:
+    wnn_binary_compression_level = 1
 device = "cuda" if torch.cuda.is_available() else "cpu"
+# device = "cpu" # for debug
 
 print(f"Using device: {device}")
 
@@ -78,32 +85,24 @@ vocab_size = len(chars) # is 65 for current dat   zaset (tiny shakjespere)
 print("vocab size: ", vocab_size)
 
 length_of_previous_binary = 0
-def compress_binary(binary):
-    compress=[]
-    global length_of_previous_binary
-    length_of_previous_binary = len(binary)
-    
-    for i in range(0, len(binary), wnn_binary_compression_level):
-        if i % wnn_binary_compression_level == 0:
-            chunk = binary [i:i+wnn_binary_compression_level]
 
-            chunk = [int(bit) for bit in chunk]  # Ensure chunk is a list
-            if sum(chunk)>= wnn_binary_compression_level / 2:  # If more than half of the bits are 1, we consider it a 1
-                compress.append(1)
-            else:
-                compress.append(0)
-    return compress
+
+pca = PCA(n_components=int(n_embedd/wnn_binary_compression_level))  # reduce to 128 dims
+
+
+def compress_binary(embedding):
+    if not compression:
+        return embedding
+    embedding = np.array(embedding).reshape(1, -1)
+    flat = pca.transform(embedding).flatten().tolist()
+    return flat
+
 
 def decompress_binary(compressed):
-    decompressed = []
-    for bit in compressed:
-        if bit == 1:
-            decompressed.extend([1] * wnn_binary_compression_level)
-        else:
-            decompressed.extend([0] * wnn_binary_compression_level)
-    decompressed=decompressed[:length_of_previous_binary]
-    return decompressed
-
+    if not compression:
+        return compressed
+    compressed = np.array(compressed).reshape(1, -1)
+    return pca.inverse_transform(compressed).flatten().tolist()
 
 def numToBinary(num):
     binary = format(int(num), f"0{int(n_embedd)}b")
@@ -192,7 +191,7 @@ class weightlessNeuralNetwork():
         return binary_embedding
 
     def forward(self, input):
-        B,T,C = input.shape
+        B,T,C = input.shape  # here batch size is always 1
         input = input.cpu().detach().numpy() 
         outputs = np.zeros(input.shape, dtype=np.float32)
         if len(self.lookup_map) >= int(block_size):
@@ -230,7 +229,7 @@ class weightlessNeuralNetwork():
             input.append(compress_binary(self.float_to_bin(inp.detach().cpu().numpy())))
             label.append(compress_binary(numToBinary(lbl.cpu().numpy())))         
 
-        self.WNN.next_state_batch(input,label) # In each batch sequence is vital
+        self.WNN.next_state_batch(input,label, unsequenced=False) 
         self.external_state_count += len(input) # debug
         self.WNN.reset_state()
         print("finished wnn train")
@@ -357,9 +356,11 @@ class BigramLanguageModel(nn.Module):
                     #emb = emb.unsqueeze(0).to(device) # adding the batch dimension ( of one ) so it doesnt break
                     xs.append(emb)
                     ys.append(current_label_encoded)
+                temp_xs = torch.cat(xs, dim=0).cpu().detach().numpy()
+
+                pca.fit(temp_xs)  # fit the pca on all the embeddings to get a good representation
                 xs = torch.stack(xs) # shape (B,T,C)
                 ys = torch.stack(ys) # shape (B,T) 
-                
                 print("shape of xs: ", xs.shape, " shape of ys: ", ys.shape)
                 for block in self.blocks[:i+1]: # we want to pass the input through all the blocks up to and including the current one
                     xs = xs + block.sa(block.ln1(xs))

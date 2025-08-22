@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset
 
+# Created from Andrej Karpathy's minGPT repo. This is a reference for the base of the weightless neural network augmented transformer model in WNN-Transformer.py
 """
 KEY POINTS:
 1. The BigramLanguageModel is a simple next token prediction model that when combined with the transformer blocks can learn complex patterns in the data.
