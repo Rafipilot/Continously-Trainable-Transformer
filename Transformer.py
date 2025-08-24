@@ -20,11 +20,11 @@ KEY POINTS:
    """
 
 # Hyperparameters
-block_size = 64 # essentially the context window
-batch_size = 256 # how many in parralel training examples to run
-max_iters = 20000 # training iters
-eval_interval = 300 # how often to calc losses
-learning_rate = 3e-4 
+block_size = 64 # how many tokens to look at in the past to predict the next token
+batch_size = 128 # how many in parralel training examples to run
+max_iters = 25000 # how many iterations to train for
+eval_interval = 300
+learning_rate = 3e-4
 eval_iters = 200
 n_embedd = 128 # embedding dimension for each token
 n_layer = 8 # is the number of transformer blocks
@@ -35,8 +35,11 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
 # Load dataset
-dataset = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="train")["text"]
-dataset = "\n".join(dataset)
+# dataset = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="train")["text"]
+# dataset = "\n".join(dataset)
+
+with open("tinyshakespeare.txt", "r") as f:
+    dataset = f.read()
 
 min_freq = 50
 char_counts ={}
@@ -221,9 +224,9 @@ class BigramLanguageModel(nn.Module):
 
 # Training
 model = BigramLanguageModel().to(device)
-model.load_state_dict(torch.load("WNNTransformerWikiDataset128Emed5kIters8Layers.pth", weights_only=False))
+model.load_state_dict(torch.load("ModelStateSaves/WNNTransformerTinyShakespearDataset128Emed25kIters8Layers.pth", weights_only=False))
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+#optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 # for step in range(max_iters):
 #     if step % eval_interval == 0:
@@ -239,6 +242,6 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 # torch.save(model.state_dict(), "bigram_language_model.pth")
 
 # Text generation
-context = torch.tensor([encode("H")], dtype=torch.long, device=device)
+context = torch.tensor([encode("london is")], dtype=torch.long, device=device)
 generated = model.generate(context, max_new_tokens=200)[0].tolist()
 print(decode(generated))

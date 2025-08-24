@@ -35,10 +35,10 @@ n_layer = 8 # is the number of transformer blocks
 n_head = 8 # number of heads in multi-head attention
 dropout = 0.2 # dropout is esentially a technique to prevent overfitting by randomly disabling some neural connections during training
 
-num_wnn_blocks = 1
+num_wnn_blocks = 8
 compression = True # disables compression. For small scale testing we would probably want compression to reduce the inference time of the WNN but on larger models it would be ideal to disable compression to get the best performance
 
-wnn_binary_compression_level = 2 # mostly to increase speed of inference- less neurons
+wnn_binary_compression_level = 8 # mostly to increase speed of inference- less neurons
 
 if not compression:
     wnn_binary_compression_level = 1
@@ -84,9 +84,6 @@ chars = sorted(chars)
 vocab_size = len(chars) # is 65 for current dat   zaset (tiny shakjespere)
 print("vocab size: ", vocab_size)
 
-
-
-
 def compress_binary(embedding):
     if not compression:
         return embedding
@@ -101,24 +98,6 @@ def decompress_binary(compressed):
     compressed = np.array(compressed).reshape(1, -1)
     return pca.inverse_transform(compressed).flatten().tolist()
 
-def numToBinary(num):
-    binary = format(int(num), f"0{int(n_embedd)}b")
-    return list(binary)
-
-def floatToBinary(num, threshold=0):
-    if num >= threshold:
-        return 1
-    else:
-        return 0
-
-def binaryToNum(binary):
-    return int(str(binary), 2)
-
-def listToBinary(numpy_array):
-    return np.where(numpy_array > 0, 1, 0).astype(np.uint8)
-
-def tensorToBinary(tensor):
-    return np.where(tensor.cpu().detach().numpy() > 0, 1, 0).astype(np.uint8)
 
 stoi = {ch: i for i, ch in enumerate(chars)} # string to index
 itos = {i: ch for i, ch in enumerate(chars)} # index to string
@@ -231,7 +210,6 @@ class weightlessNeuralNetwork():
         self.WNN.next_state_batch(input,label, unsequenced=False) 
         self.external_state_count += len(input) # debug
         self.WNN.reset_state()
-        print("finished wnn train")
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
@@ -265,8 +243,8 @@ class Block(nn.Module):
         head_size = n_embedd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embedd)
-        self.wnn_block = wnn_block # we only activate the wnn block in the last transformer block
-        self.use_wnn = use_wnn # here as more of a placeholder
+        self.wnn_block = wnn_block # we only activate the wnn block in the last n layers as specified by num_wnn_blocks
+        self.use_wnn = use_wnn 
 
         self.WNN = weightlessNeuralNetwork()  # Using the weightless neural network init anyway to reduce error
         self.ln1 = nn.LayerNorm(n_embedd) # layer normalization
@@ -281,10 +259,12 @@ class Block(nn.Module):
         if self.wnn_block:
             if self.use_wnn: # not using wnn for training only for inference 
                 self.pre_wnn_x.requires_grad_()
-                x = self.pre_wnn_x + (self.WNN.forward(self.pre_wnn_x))
+                x = self.pre_wnn_x + self.WNN.forward(self.pre_wnn_x)
+                return x
             else:
                 x = self.pre_wnn_x
-        return x   
+        return self.pre_wnn_x  
+        #return self.pre_wnn_x.requires_grad_()
 
 # Language model
 
@@ -333,9 +313,17 @@ class BigramLanguageModel(nn.Module):
         A_inv = torch.linalg.inv(A) # The goal here is to approximate the inverse of the bigram model to we can get the embedding that would produce the change in logits
         B = A_inv @ W.T
         #with torch.no_grad():  # no gradients in PyTorch
+        for block in self.blocks:
+            # Now im not sure if this is the right thing to do here since we do want to train the WNN blocks ahead of the current one with the wnn input so it can learn to produce the right output
+            # However WNN forward is very expensive so we are skipping it for now but for proper training we should include it and comment the below line out
+            block.use_wnn=False # we don't want to use the wnn during training only during inference
+        
         for i,block in enumerate(self.blocks): # iterate through each wnn transformer block
+            print("training wnn block: ", i)
             if not block.wnn_block:
                 continue
+
+            print("collecting data for wnn training")
             now = datetime.now()
             contexts = []
             true_next_tokens = []
@@ -355,42 +343,52 @@ class BigramLanguageModel(nn.Module):
             contexts_tensor = torch.tensor(contexts, dtype=torch.long, device=device)
             targets_tensor = torch.tensor(true_next_tokens, dtype=torch.long, device=device)
 
-            # --- Forward and Backward Pass ---
-            
-            # We need to temporarily set the model to train mode for gradients
+            # What the following code does is relatively comples
+            # we do a forward pass through all the transformer blocks up to the current wnn block
+            # then we do a forward pass through the current wnn block to get the pre wnn x
+            # we retain gradients on the pre wnn x
+            # then we do a forward pass through the rest of the transformer blocks
+            # then we get the logits and compute the loss relative to the target given by the overall label
+            # we then grab the gradient with respect to pre wnn x and use that as the target resiudal for training the wnn
+            # The key idea here is that we are using the weightless neural network to add small residual to the overall input to the lm head which knocks the output logits closer to the target token
+            print("calculating gradients")
             self.train()
             
             x = self.token_embedding_table(contexts_tensor) + self.position_embedding_table(torch.arange(block_size, device=device))
 
-            for block_idx in range(i):
+            for block_idx in range(i): # this pass through all the blocks up to the current wnn block
                 x = self.blocks[block_idx].forward(x)  # pass through all previous blocks but not the current one
 
 
-            _ = block.forward(x)  # pass through the
+            _ = block.forward(x)  # pass through the current block to get the pre WNN x
             pre_wnn_x = block.pre_wnn_x  # get the pre WNN x from the current block
 
-            pre_wnn_x.retain_grad()  # we need gradients w.r.t. this tensor
+            pre_wnn_x.retain_grad()  # we need gradients w.r.t. pre wnn x 
 
             x = pre_wnn_x
-
+           
+            # pass through the rest of the blocks
             for block_idx in range(i+1, len(self.blocks)):
                 x = self.blocks[block_idx].forward(x)
 
             logits = self.lm_head(x)
 
-            loss = F.cross_entropy(logits[:, -1, :], targets_tensor)
+            loss = F.cross_entropy(logits[:, -1, :], targets_tensor) # compute the loss w.r.t the target token
 
             self.zero_grad()
-            loss.backward()
+            loss.backward() # get the gradients 
 
-            wnn_target_resiudal = -pre_wnn_x.grad
+            wnn_target_resiudal = -pre_wnn_x.grad # the target residual is the negative gradient w.r.t pre wnn x because we want to move in the direction that reduces the loss
+            # explaining futher this gradient tells us how to change pre wnn x to reduce the loss since we have calculated the loss with respect to the target token 
+            # so we want to to nudge the wnn resiudal toward the gradient to reduce the delta between the predicted token and the target token
 
 
             print("time for preparing data: ", datetime.now()-now)
-
+            print("training wnn")
             now1 = datetime.now()
             block.WNN.train(pre_wnn_x.detach(), wnn_target_resiudal)
             print("time for training WNN: ", datetime.now()-now1)
+        self.eval() # set back to eval mode
 
     def generate(self, idx, max_new_tokens):
         for block in self.blocks:
@@ -437,28 +435,38 @@ if compression:
 
 #Text generation
 
-# max_new_tokens = 5
-# context = torch.tensor([encode("The people")], dtype=torch.long, device=device)
-# now = datetime.now()
-# generated = model.generate(context, max_new_tokens)[0].tolist()
-# print(decode(generated))
+max_new_tokens = 120
+context = torch.tensor([encode("london is ")], dtype=torch.long, device=device)
+now = datetime.now()
+generated = model.generate(context, max_new_tokens)[0].tolist()
+print(decode(generated))
 
 #print("time to generate ", max_new_tokens , " : ", datetime.now()-now, "s")
+
+
+# retrain = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="train")["text"]
+# retrain = "\n".join(retrain)
+
+
+# model.trainWNN(retrain[:1000])  # retrain the WNN on new data
+
+model.trainWNN("""London is a city that folds on itself. Old roads run beside towers of glass, and the street carries the sound of voices in a hundred tongues. The river divides, yet it binds; every bridge is a line that keeps the city whole.
+
+In the day, the walk is fast. Buses roll, the tube hums, the crowd moves in a tide. The air is thick with trade, talk, and rush. In markets, food and sound press close. In squares, the pace slows. A man reads, a child runs, and time feels soft.
+
+The night is never still. The city glows in steel, neon, and rain. Cars stream, the eye wheel turns, and the river keeps its dark mirror. Pubs spill with sound, clubs shake with bass, and the city speaks a new tongue.
+
+London is a place of power, yet it is also memory. Stone arches tell of kings and war, yet the same ground now holds code, art, and finance. It is a city of rule and of revolt. The past is not gone; it is present in the walls, in the names of the roads, in the stones underfoot.
+
+It is not one city but many. The west is light and show, the east is steel and dock made new, the north is book and park, and the south is street and climb. Every part holds a voice, and every voice adds to the play.
+
+London is not at rest. It feeds on change. It asks for dream, for plan, for risk. It can be harsh, yet it can also be kind. It is never the same city twice.""")
+
 
 for block in model.blocks: # we want to use the wnn forward when generating text
     block.use_wnn=True
 
-# retrain = load_dataset("Salesforce/wikitext", 'wikitext-103-raw-v1', split="train")["text"]
-# retrain = "\n".join(retrain)
-# print("len retrain: ", len(retrain))
 
-#model.trainWNN(retrain[:1000])  # retrain the WNN on new data
-
-model.trainWNN("""london is a city of rain and neon, old stone and new glass.
-a river runs slow, a market hums and a bridge keeps its watch.
-the tube thrums beneath and buses seam the day.
-art, code, and craft meet in a street where light and shadow pass.
-at night the city breathes, a long awake that never sleeps.""")
 print("WNN story state after retraining: ", model.blocks[-1].WNN.WNN.state)
 print("debug external state count: ", model.blocks[-1].WNN.external_state_count) # debug
 max_new_tokens = 120
